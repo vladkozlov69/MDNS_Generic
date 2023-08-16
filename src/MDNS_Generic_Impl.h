@@ -48,10 +48,16 @@
 #if MDNS_USING_WIFININA
   #include <WiFiUdp_Generic.h>
 #else
-  #include <Udp.h>
+///  #include <Udp.h>
+#include <wifi_Udp.h>
 #endif
 
 #include "MDNS_EthernetUtil_Impl.h"
+
+#include "lwip/igmp.h"
+//#include <lwip/sockets.h>
+#include <lwip/netif.h>
+extern struct netif xnetif[];
 
 ////////////////////////////////////////
 
@@ -153,6 +159,7 @@ void my_free(void* ptr)
 #endif
 }
 
+
 ////////////////////////////////////////
 ////////////////////////////////////////
 
@@ -162,6 +169,7 @@ MDNS::MDNS(UDP& udp)
   memset(&this->_serviceRecords, 0, sizeof(this->_serviceRecords));
 
   this->_udp = &udp;
+  this->_budp = new BufferedUdp(this->_udp);
   this->_state = MDNSStateIdle;
   //   this->_sock = -1;
 
@@ -200,8 +208,29 @@ int MDNS::begin(const IPAddress& ip, const char* name)
   
   if (statusCode)
   {
-    statusCode = this->_udp->beginMulticast(mdnsMulticastIPAddr, MDNS_SERVER_PORT);
+
+	  ip4_addr a1; a1.addr = _ipAddress;//.);// = _ipAddress;// = { _ipAddress[0], _ipAddress[1], _ipAddress[2], _ipAddress[3] };
+	  ip4_addr a2; a2.addr = mdnsMulticastIPAddr ;// = { _ipAddress[0], _ipAddress[1], _ipAddress[2], _ipAddress[3] };
+
+	  if (igmp_joingroup(&a1, &a2) != ERR_OK)
+	  {
+		  Serial.println("igmp_joingroup error");
+	  }
+	  xnetif[0].flags |= NETIF_FLAG_IGMP;
+
+	  this->_udp->begin(MDNS_SERVER_PORT);
+
+//    statusCode = this->_udp->beginMulticast(mdnsMulticastIPAddr, MDNS_SERVER_PORT);
     
+//	      _ctx = new UdpContext;
+//	      _ctx->ref();
+//	      ip_addr_t addr = IPADDR4_INIT(INADDR_ANY);
+//	      if (!_ctx->listen(&addr, port)) {
+//	          return 0;
+//	      }
+//
+//	      return 1;beginMulticast
+
     MDNS_LOGDEBUG1("::begin: UDP beginMulticast statusCode=", (statusCode == 1) ? "OK" : "Error");    
   }
 
@@ -352,9 +381,10 @@ int MDNS::isDiscoveringService()
 // return value:
 // A DNSError_t (DNSSuccess on success, something else otherwise)
 // in "int" mode: positive on success, negative on error
-MDNSError_t MDNS::_sendMDNSMessage(uint32_t /*peerAddress*/, uint32_t xid, int type, int serviceRecord)
+MDNSError_t MDNS::_sendMDNSMessage(uint32_t peerAddress, uint32_t xid, int type, int serviceRecord)
 {
   MDNSError_t statusCode = MDNSSuccess;
+  IPAddress remoteAddr = IPAddress(peerAddress);
   uint16_t ptr = 0;
   
 #if defined(_USE_MALLOC_)
@@ -407,9 +437,21 @@ MDNSError_t MDNS::_sendMDNSMessage(uint32_t /*peerAddress*/, uint32_t xid, int t
       break;
   }
 
-  this->_udp->beginPacket(mdnsMulticastIPAddr, MDNS_SERVER_PORT);
-  this->_udp->write((uint8_t*)dnsHeader, sizeof(DNSHeader_t));
+  for (int i = 0; i < sizeof(DNSHeader_t); i++)
+  {
+	  Serial.print(((uint8_t *)dnsHeader)[i], HEX);
+	  Serial.print(" ");
+  }
+
+  Serial.println();
+
+  int bpResult = this->_budp->beginPacket((peerAddress == 0 ? mdnsMulticastIPAddr : remoteAddr), MDNS_SERVER_PORT);
+  int dnsHeaderWriteResult =  this->_budp->write((uint8_t*)dnsHeader, sizeof(DNSHeader_t));
+
+  MDNS_LOGDEBUG1("::_sendMDNSMessage: bpResult=", bpResult);
+  MDNS_LOGDEBUG1("::_sendMDNSMessage: dnsHeaderWriteResult=", dnsHeaderWriteResult);
   
+  MDNS_LOGDEBUG1("::_sendMDNSMessage: peer=", remoteAddr.get_address());
   MDNS_LOGDEBUG1("::_sendMDNSMessage: xid=", dnsHeader->xid);
   MDNS_LOGDEBUG1("::_sendMDNSMessage: queryCount=", dnsHeader->queryCount);
   MDNS_LOGDEBUG1("::_sendMDNSMessage: answerCount=", dnsHeader->answerCount);
@@ -447,7 +489,7 @@ MDNSError_t MDNS::_sendMDNSMessage(uint32_t /*peerAddress*/, uint32_t xid, int t
         // data length
         *((uint16_t*)&buf[8]) = ethutil_htons(8 + strlen((char*)this->_name));
 
-        this->_udp->write((uint8_t*)buf, 10);
+        this->_budp->write((uint8_t*)buf, 10);
         ptr += 10;
         // priority and weight
         buf[0] = buf[1] = buf[2] = buf[3] = 0;
@@ -455,7 +497,7 @@ MDNSError_t MDNS::_sendMDNSMessage(uint32_t /*peerAddress*/, uint32_t xid, int t
         // port
         *((uint16_t*)&buf[4]) = ethutil_htons(this->_serviceRecords[serviceRecord]->port);
 
-        this->_udp->write((uint8_t*)buf, 6);
+        this->_budp->write((uint8_t*)buf, 6);
         ptr += 6;
         // target
         this->_writeDNSName(this->_name, &ptr, buf, sizeof(DNSHeader_t), 1);
@@ -471,7 +513,7 @@ MDNSError_t MDNS::_sendMDNSMessage(uint32_t /*peerAddress*/, uint32_t xid, int t
         // ttl
         *((uint32_t*)&buf[4]) = ethutil_htonl(MDNS_RESPONSE_TTL);
 
-        this->_udp->write((uint8_t*)buf, 8);
+        this->_budp->write((uint8_t*)buf, 8);
         ptr += 8;
 
         // data length && text
@@ -481,17 +523,17 @@ MDNSError_t MDNS::_sendMDNSMessage(uint32_t /*peerAddress*/, uint32_t xid, int t
           buf[1] = 0x01;
           buf[2] = 0x00;
 
-          this->_udp->write((uint8_t*)buf, 3);
+          this->_budp->write((uint8_t*)buf, 3);
           ptr += 3;
         } 
         else 
         {
           int slen = strlen((char*)this->_serviceRecords[serviceRecord]->textContent);
           *((uint16_t*)buf) = ethutil_htons(slen);
-          this->_udp->write((uint8_t*)buf, 2);
+          this->_budp->write((uint8_t*)buf, 2);
           ptr += 2;
 
-          this->_udp->write((uint8_t*)this->_serviceRecords[serviceRecord]->textContent, slen);
+          this->_budp->write((uint8_t*)this->_serviceRecords[serviceRecord]->textContent, slen);
           ptr += slen;
         }
 
@@ -510,7 +552,7 @@ MDNSError_t MDNS::_sendMDNSMessage(uint32_t /*peerAddress*/, uint32_t xid, int t
         uint16_t dlen = strlen((char*)this->_serviceRecords[serviceRecord]->servName) + 2;
         *((uint16_t*)&buf[8]) = ethutil_htons(dlen);
 
-        this->_udp->write((uint8_t*)buf, 10);
+        this->_budp->write((uint8_t*)buf, 10);
         ptr += 10;
 
         this->_writeServiceRecordName(serviceRecord, &ptr, buf, sizeof(DNSHeader_t), 1);
@@ -549,7 +591,7 @@ MDNSError_t MDNS::_sendMDNSMessage(uint32_t /*peerAddress*/, uint32_t xid, int t
       buf[1] = (type == MDNSPacketTypeServiceQuery) ? 0x0c : 0x01;
       buf[3] = 0x1;
 
-      this->_udp->write((uint8_t*)buf, sizeof(DNSHeader_t));
+      this->_budp->write((uint8_t*)buf, sizeof(DNSHeader_t));
       ptr += sizeof(DNSHeader_t);
 
       this->_resolveLastSendMillis[(type == MDNSPacketTypeServiceQuery) ? 1 : 0] = millis();
@@ -568,7 +610,7 @@ MDNSError_t MDNS::_sendMDNSMessage(uint32_t /*peerAddress*/, uint32_t xid, int t
       buf[1] = 0x1c; // AAAA record
       buf[3] = 0x01;
 
-      this->_udp->write((uint8_t*)buf, 4);
+      this->_budp->write((uint8_t*)buf, 4);
       ptr += 4;
 
       // send our IPv4 address record as additional record, in case the peer wants it.
@@ -578,7 +620,7 @@ MDNSError_t MDNS::_sendMDNSMessage(uint32_t /*peerAddress*/, uint32_t xid, int t
     }
   }
 
-  this->_udp->endPacket();
+  this->_budp->endPacket();
 
 #if defined(_USE_MALLOC_)
 errorReturn:
@@ -611,12 +653,13 @@ MDNSError_t MDNS::_processMDNSQuery()
   unsigned int i, j;
   uint8_t* buf;
   uint32_t xid = 0;
-  uint16_t udp_len, qCnt, aCnt, aaCnt, addCnt;
+  uint16_t udp_len, qCnt, aCnt, aaCnt, addCnt, remotePort;
   uint8_t recordsAskedFor[NumMDNSServiceRecords + 2];
   uint8_t recordsFound[2];
   uint8_t wantsIPv6Addr = 0;
   uint8_t * udpBuffer = NULL;
   uintptr_t ptr;
+  IPAddress remoteIP;
 
   memset(recordsAskedFor, 0, sizeof(recordsAskedFor));
   memset(recordsFound, 0, sizeof(recordsFound));
@@ -636,6 +679,11 @@ MDNSError_t MDNS::_processMDNSQuery()
     goto errorReturn;
   }
 
+  remotePort = this->_udp->remotePort();
+  remoteIP = this->_udp->remoteIP();
+
+  udp_len = 256;
+
   udpBuffer = (uint8_t*) my_malloc(udp_len);  //allocate memory to hold _remaining UDP packet
   
   if (NULL == udpBuffer) 
@@ -648,7 +696,7 @@ MDNSError_t MDNS::_processMDNSQuery()
     goto errorReturn;
   }
   
-  this->_udp->read((uint8_t*) udpBuffer, udp_len);//read _remaining UDP packet from W5100/W5200 into memory
+  udp_len = this->_udp->read((uint8_t*) udpBuffer, udp_len);//read _remaining UDP packet from W5100/W5200 into memory
   
   MDNS_LOGINFO1("::_processMDNSQuery: UDP parsePacket len=", udp_len);
   MDNS_LOGINFO("buffer======");
@@ -662,6 +710,14 @@ MDNSError_t MDNS::_processMDNSQuery()
       MDNS_LOGINFO0("\n");
   }
   
+  MDNS_LOGINFO0("\n");
+
+  for (int i = 0; i < udp_len; i++)
+  {
+    Serial.print((char) (udpBuffer[i]));
+    Serial.print(" ");
+  }
+
   MDNS_LOGINFO0("\n");
   MDNS_LOGINFO("=====");
   
@@ -686,8 +742,20 @@ MDNSError_t MDNS::_processMDNSQuery()
   aaCnt = ethutil_ntohs(dnsHeader->authorityCount);
   addCnt = ethutil_ntohs(dnsHeader->additionalCount);
 
-  if (0 == dnsHeader->queryResponse && DNSOpQuery == dnsHeader->opCode &&
-      MDNS_SERVER_PORT == this->_udp->remotePort())
+  MDNS_LOGDEBUG1("::_processMDNSQuery: xid=", dnsHeader->xid);
+  MDNS_LOGDEBUG1("::_processMDNSQuery: queryCount=", dnsHeader->queryCount);
+  MDNS_LOGDEBUG1("::_processMDNSQuery: qCnt=", qCnt);
+  MDNS_LOGDEBUG1("::_processMDNSQuery: answerCount=", dnsHeader->answerCount);
+  MDNS_LOGDEBUG1("::_processMDNSQuery: authorityCount=", dnsHeader->authorityCount);
+  MDNS_LOGDEBUG1("::_processMDNSQuery: additionalCount=", dnsHeader->additionalCount);
+  MDNS_LOGDEBUG1("::_processMDNSQuery: queryResponse=", dnsHeader->queryResponse);
+  MDNS_LOGDEBUG1("::_processMDNSQuery: opCode=", dnsHeader->opCode);
+  MDNS_LOGDEBUG1("::_processMDNSQuery: remotePort=", remotePort);
+  MDNS_LOGDEBUG1("::_processMDNSQuery: remoteIP=", remoteIP);
+
+  if (0 == dnsHeader->queryResponse && DNSOpQuery == dnsHeader->opCode
+		  //&& MDNS_SERVER_PORT == remotePort
+		  )
   {
     // process an MDNS query
     int offset = sizeof(DNSHeader_t);
@@ -708,12 +776,14 @@ MDNSError_t MDNS::_processMDNSQuery()
       servNamePos[0] = 0;
       servLens[0] = strlen((char*)this->_name);
       servMatches[0] = 1;
+      MDNS_LOGDEBUG1("::_processMDNSQuery: this->_name=", (char*)this->_name);
 
       // second entry is our own the general DNS-SD service
       servNames[1] = (const uint8_t*)DNS_SD_SERVICE;
       servNamePos[1] = 0;
       servLens[1] = strlen((char*)DNS_SD_SERVICE);
       servMatches[1] = 1;
+      MDNS_LOGDEBUG1("::_processMDNSQuery: DNS_SD_SERVICE=", (char*)DNS_SD_SERVICE);
 
       for (j = 2; j < NumMDNSServiceRecords + 2; j++)
       {
@@ -813,7 +883,7 @@ MDNSError_t MDNS::_processMDNSQuery()
 #if (defined(HAS_SERVICE_REGISTRATION) && HAS_SERVICE_REGISTRATION) || (defined(HAS_NAME_BROWSING) && HAS_NAME_BROWSING)
 
   else if (1 == dnsHeader->queryResponse && DNSOpQuery == dnsHeader->opCode &&
-           MDNS_SERVER_PORT == this->_udp->remotePort() &&
+           //MDNS_SERVER_PORT == remotePort &&
            (NULL != this->_resolveNames[0] || NULL != this->_resolveNames[1]))
   {
     int offset = sizeof(DNSHeader_t);
@@ -1242,8 +1312,11 @@ errorReturn:
   {
     if (recordsAskedFor[j]) 
     {
+    	MDNS_LOGDEBUG1("::_processMDNSQuery: recordsAskedFor =", j);
       if (0 == j)
-        (void)this->_sendMDNSMessage(this->_udp->remoteIP(), xid, (int)MDNSPacketTypeMyIPAnswer, 0);
+      {
+    	  (void)this->_sendMDNSMessage(remoteIP, xid, (int)MDNSPacketTypeMyIPAnswer, 0);
+      }
       else if (1 == j) 
       {
         uint8_t k = 2;
@@ -1252,13 +1325,13 @@ errorReturn:
           recordsAskedFor[k + 2] = 1;
       } 
       else if (NULL != this->_serviceRecords[j - 2])
-        (void)this->_sendMDNSMessage(this->_udp->remoteIP(), xid, (int)MDNSPacketTypeServiceRecord, j - 2);
+        (void)this->_sendMDNSMessage(remoteIP, xid, (int)MDNSPacketTypeServiceRecord, j - 2);
     }
   }
 
   // if we were asked for our IPv6 address, say that we don't have any
   if (wantsIPv6Addr)
-    (void)this->_sendMDNSMessage(this->_udp->remoteIP(), xid, (int)MDNSPacketTypeNoIPv6AddrAvailable, 0);
+    (void)this->_sendMDNSMessage(remoteIP, xid, (int)MDNSPacketTypeNoIPv6AddrAvailable, 0);
 
   return statusCode;
 }
@@ -1280,7 +1353,7 @@ void MDNS::run()
 #endif
   
   // first, look for MDNS queries to handle
-  //(void)_processMDNSQuery();
+  (void)_processMDNSQuery();
 
   // are we querying a name or service? if so, should we resend the packet or time out?
   for (i = 0; i < 2; i++) 
@@ -1556,7 +1629,7 @@ void MDNS::_writeDNSName(const uint8_t* name, uint16_t* pPtr,
 
       if (--len <= 0) 
       {
-        this->_udp->write((uint8_t*)buf, bufSize);
+        this->_budp->write((uint8_t*)buf, bufSize);
         ptr += bufSize;
         len = bufSize;
         p3 = buf;
@@ -1568,7 +1641,7 @@ void MDNS::_writeDNSName(const uint8_t* name, uint16_t* pPtr,
 
     if (len != bufSize) 
     {
-      this->_udp->write((uint8_t*)buf, bufSize - len);
+      this->_budp->write((uint8_t*)buf, bufSize - len);
       ptr += bufSize - len;
     }
   }
@@ -1576,7 +1649,7 @@ void MDNS::_writeDNSName(const uint8_t* name, uint16_t* pPtr,
   if (zeroTerminate) 
   {
     buf[0] = 0;
-    this->_udp->write((uint8_t*)buf, 1);
+    this->_budp->write((uint8_t*)buf, 1);
     ptr += 1;
   }
 
@@ -1595,7 +1668,7 @@ void MDNS::_writeMyIPAnswerRecord(uint16_t* pPtr, uint8_t* buf, int bufSize)
   buf[1] = 0x01;
   buf[2] = 0x80; // cache flush: true
   buf[3] = 0x01;
-  this->_udp->write((uint8_t*)buf, 4);
+  this->_budp->write((uint8_t*)buf, 4);
   ptr += 4;
 
   *((uint32_t*)buf) = ethutil_htonl(MDNS_RESPONSE_TTL);
@@ -1609,7 +1682,7 @@ void MDNS::_writeMyIPAnswerRecord(uint16_t* pPtr, uint8_t* buf, int bufSize)
 
   memcpy(&buf[6], &myIp, 4);              // our IP address
 
-  this->_udp->write((uint8_t*)buf, 10);
+  this->_budp->write((uint8_t*)buf, 10);
   ptr += 10;
 
   *pPtr = ptr;
@@ -1660,7 +1733,7 @@ void MDNS::_writeServiceRecordPTR(int recordIndex, uint16_t* pPtr, uint8_t* buf,
   // data length (+13 = "._tcp.local" or "._udp.local" + 1  byte zero termination)
   *((uint16_t*)&buf[8]) = ethutil_htons(strlen((char*)this->_serviceRecords[recordIndex]->name) + 13);
 
-  this->_udp->write((uint8_t*)buf, 10);
+  this->_budp->write((uint8_t*)buf, 10);
   ptr += 10;
 
   this->_writeServiceRecordName(recordIndex, &ptr, buf, bufSize, 0);

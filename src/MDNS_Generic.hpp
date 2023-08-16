@@ -128,11 +128,73 @@ typedef void (*MDNSServiceFoundCallback)(const char*, MDNSServiceProtocol_t, con
 
 ////////////////////////////////////////
 
+class BufferedUdp
+{
+private:
+	UDP * m_Udp;
+	uint8_t m_Buffer[512];
+	size_t m_Ptr;
+	IPAddress m_IP;
+	uint16_t m_Port = 0;
+public:
+	BufferedUdp(UDP * _udp)
+	{
+		m_Ptr = 0;
+		memset(m_Buffer, 0, sizeof(m_Buffer));
+		m_Udp = _udp;
+	}
+	int beginPacket(IPAddress ip, uint16_t port)
+	{
+		Serial.print("BufferedUdp::beginPacket begin ");
+		Serial.print(ip.get_address());
+		Serial.print(':');
+		Serial.println(port);
+		m_Ptr = 0;
+		memset(m_Buffer, 0, sizeof(m_Buffer));
+		m_IP = ip;
+		m_Port = port;
+		Serial.println("BufferedUdp::beginPacket end ");
+		return 1;
+	}
+
+	int endPacket()
+	{
+		for(int i = 0; i < m_Ptr; i++)
+		{
+			Serial.print(m_Buffer[i], HEX);
+			Serial.print(' ');
+		}
+		Serial.println();
+		m_Udp->beginPacket(m_IP, m_Port);
+		m_Udp->write(m_Buffer, min(29, m_Ptr));
+		m_Udp->endPacket();
+		Serial.println("Packet sent.");
+
+		return true;
+	}
+	size_t write(const uint8_t *buffer, size_t size)
+	{
+		Serial.print("BufferedUdp::write, m_Ptr = ");
+		Serial.print(m_Ptr);
+		Serial.print('+');
+		Serial.println(size);
+		for (int i=0;i<size;i++)
+		{
+			m_Buffer[m_Ptr+i] = buffer[i];
+		}
+
+		m_Ptr += size;
+		Serial.println("BufferedUdp::write end");
+	    return size;
+	}
+};
+
 //class MDNS
 class MDNS
 {
   private:
     UDP*                      _udp;
+    BufferedUdp*              _budp;
     IPAddress                 _ipAddress;
     MDNSDataInternal_t        _mdnsData;
     MDNSState_t               _state;

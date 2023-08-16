@@ -53,7 +53,7 @@
 // 4: DEBUG: errors, warnings, informational and debug
 
 #ifndef _MDNS_LOGLEVEL_
-#define _MDNS_LOGLEVEL_       0
+#define _MDNS_LOGLEVEL_       4
 #endif
 
 ///////////////////////////////////////
